@@ -3,5 +3,5 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 for d in skills/nse-*/; do cp src/nse.py src/holidays.json "$d"; done
-cp src/nse.py src/holidays.json src/crypto.py skills/crypto-coindcx/
+cp src/nse.py src/holidays.json src/crypto.py src/futures.py skills/crypto-coindcx/
 echo "built: $(ls -d skills/*/ | wc -l) skills"

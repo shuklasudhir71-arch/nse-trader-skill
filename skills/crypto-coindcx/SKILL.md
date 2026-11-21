@@ -28,7 +28,21 @@ python3 "${CLAUDE_SKILL_DIR}/crypto.py" backtest --days 365 --trades
 python3 "${CLAUDE_SKILL_DIR}/crypto.py" news --coins BTC,ETH
 ```
 
+Futures (CoinDCX USDT perpetuals, long and short, 2x leverage by default, paper only):
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/futures.py" scan                   # signals with stop, target, margin, liquidation price
+python3 "${CLAUDE_SKILL_DIR}/futures.py" backtest --days 365 --trades
+```
+
 Needs network access to api.coindcx.com and public.coindcx.com (public data, no key).
+
+For futures, also say: leverage stays low (2x default, futures/config.json `leverage`); every trade has a
+stop-market order and the liquidation price must sit well beyond the stop; at most `max_open_positions`
+(4) are open, because coins move together; funding is charged every 8 hours; and whether futures
+profits are taxed as crypto (30% + cess, no set-off) or as business income is unsettled, so the user
+should ask a CA. The November 2026 one-year backtest was +₹14,650 before tax with a ₹17,435 worst drop,
+and about -₹6,000 if taxed as crypto.
 
 ## What to tell the user, every time it matters
 
@@ -43,7 +57,8 @@ Needs network access to api.coindcx.com and public.coindcx.com (public data, no 
 
 ## Rules
 
-- Spot buys only. No futures, margin, leverage or short selling, even if asked: say why.
+- Spot: buys only. Futures: only through futures.py, paper, with a stop on every trade; never above the
+  leverage in futures/config.json unless the user changes it themselves, knowing the liquidation risk.
 - Stablecoins, gold tokens and wrapped coins are not traded.
 - Nothing is placed. An order needs the user's explicit yes for that exact ticket; with no connector,
   the user places it in the CoinDCX app. API keys never go in the chat.
