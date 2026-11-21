@@ -77,6 +77,7 @@ DEFAULT_CONFIG = {
     "max_order_value": 100000,
     "cash_buffer_pct": 10,
     "mis_leverage": 1,
+    "broker": "dhan",
     "product": "MIS",
     "exchange": "NSE",
     "min_reward_risk": 1.5,
@@ -1154,6 +1155,16 @@ def size_order(plan, cfg, price_now=None):
     return qty, decided, limits, risk, worst, lev
 
 
+def dhan_super_order(o):
+    """DhanHQ v2 Super Order: entry + target + stop-loss in one; when one exit fills, the other is cancelled."""
+    return {"dhanClientId": "<your Dhan client id>", "correlationId": o["id"][:25],
+            "transactionType": "BUY", "exchangeSegment": "BSE_EQ" if o["exchange"] == "BSE" else "NSE_EQ",
+            "productType": "INTRADAY" if o["product"] == "MIS" else "CNC", "orderType": "LIMIT",
+            "securityId": "<%s security id from Dhan's scrip master>" % o["symbol"],
+            "quantity": o["qty"], "price": o["entry"], "targetPrice": o["target"],
+            "stopLossPrice": o["stop"], "trailingJump": 0}
+
+
 def kite_legs(o):
     base = {"variety": "regular", "exchange": o["exchange"], "tradingsymbol": o["symbol"],
             "quantity": o["qty"], "product": o["product"], "validity": "DAY"}
@@ -1188,6 +1199,7 @@ def cmd_size(a, ctx):
              "max_loss_at_stop": r2(loss), "gain_at_target": r2(gain),
              "charges_if_stop": ch_stop, "charges_if_target": ch_tgt, "paper": bool(cfg["paper"])}
     order["kite"] = kite_legs(order)
+    order["dhan"] = dhan_super_order(order)
     _write(ctx.p("orders.json"), {"as_of": ctx.now.strftime("%Y-%m-%d %H:%M IST"), "orders": [order]})
     print("%s: %d shares at %.2f = %s (%s decided it; limits %s)."
           % (sym, qty, plan["entry"], inr(val), decided, ", ".join("%s %d" % kv for kv in limits.items())))
@@ -1338,7 +1350,11 @@ def cmd_ticket(a, ctx):
                "tag": "squareoff"}
         print("SQUARE-OFF ticket: SELL %d %s at market (%s). Getting out is never blocked by a day limit." %
               (qty, a.symbol.upper(), leg["product"]))
-        print("Cancel the open SL-M stop order for %s first, or it may sell again and leave you short." % a.symbol.upper())
+        if cfg.get("broker", "dhan") == "dhan":
+            print("In the Dhan app: Positions > %s > Exit. A Super Order's open target and stop-loss legs are cancelled "
+                  "with it; check that no leg is left open." % a.symbol.upper())
+        else:
+            print("Cancel the open SL-M stop order for %s first, or it may sell again and leave you short." % a.symbol.upper())
         print("Kite place_order parameters:\n" + json.dumps(leg, indent=2))
         print("Needs your explicit yes in the chat before anyone places it.")
         return 0
@@ -1389,7 +1405,13 @@ def cmd_ticket(a, ctx):
         print("  Target: %.2f -> gain %s - about %s charges (price alert, then you sell)"
               % (o["target"], inr(o["gain_at_target"]), inr(o["charges_if_target"]["total"])))
         print("  Square off by %s IST whatever happens." % o["flat_by"])
-        if ready:
+        if ready and cfg.get("broker", "dhan") == "dhan":
+            print("  In the Dhan app: %s > Buy > Super Order. Product %s, Limit %.2f, Qty %d, Target %.2f, "
+                  "Stop Loss %.2f. When one exit fills, Dhan cancels the other."
+                  % (o["symbol"], "Intraday" if o["product"] == "MIS" else "Delivery", o["entry"], o["qty"],
+                     o["target"], o["stop"]))
+            print("  DhanHQ API (POST /v2/super/orders):\n    " + json.dumps(o.get("dhan") or dhan_super_order(o)))
+        elif ready:
             print("  Kite place_order parameters, in order (entry first; the stop only after the entry fills):")
             for leg in o["kite"]:
                 print("    " + json.dumps(leg))

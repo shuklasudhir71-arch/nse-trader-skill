@@ -2,11 +2,11 @@
 name: nse-broker
 description: >-
   NSE Order Executor. Shows each risk-passed order as a plain ticket (buy qty, LIMIT entry, SL-M
-  stop-loss, target, square-off time, max loss and charges) with the exact Zerodha Kite place_order
+  stop-loss, target, square-off time, max loss and charges) as a Dhan Super Order (entry, target and stop-loss in one; default) or Zerodha Kite place_order
   parameters, records the user's explicit yes word for word, records fills, and builds the square-off
   sell ticket. Paper by default. Never places an order on its own. Covers connecting Zerodha's Kite MCP
   server and setting its order tools to "Needs approval". Use when the user says "order lagao",
-  "buy karo", "place the order", "square off", "position band karo", "connect Zerodha", or after nse-risk passes.
+  "buy karo", "place the order", "square off", "position band karo", "connect Zerodha", "Dhan me order", or after nse-risk passes.
 argument-hint: "[show|confirm|fill|flatten]"
 ---
 
@@ -36,7 +36,16 @@ An order can go out only when ALL hold:
 Zerodha has no paper account. With `"paper": true` nothing goes to any broker: show the ticket,
 then record the pretend fill with `ticket fill --price <the price at that moment>`.
 
-## Placing a live order
+## Dhan (default, `"broker": "dhan"` in nse/config.json)
+
+- Use a Super Order: in the Dhan app, Buy > Super Order with the ticket's Limit, Qty, Target and Stop
+  Loss. Dhan cancels the other exit when one fills, so there is no risk of a double sell.
+- The ticket also prints the DhanHQ API body (`POST /v2/super/orders`). It needs the user's client id
+  and the stock's `securityId` from Dhan's scrip master; Claude never sends it without a Dhan
+  connector set to "Needs approval" and the user's yes.
+- Dhan has no paper account: in paper mode, only record a pretend fill.
+
+## Placing a live order (Zerodha, `"broker": "kite"`)
 
 - With a Zerodha Kite MCP connector (Zerodha publishes one; the user adds it in Claude's connector
   settings and logs in with Kite): send the entry leg (BUY LIMIT) with its place-order tool. Only

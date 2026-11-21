@@ -236,6 +236,7 @@ class TestFlow(Base):
         self.assertIn("max loss per trade decided it", out)
         self.assertEqual(o["kite"][1]["order_type"], "SL-M")
         self.assertEqual(o["kite"][1]["trigger_price"], 100.0)
+        self.assertEqual((o["dhan"]["targetPrice"], o["dhan"]["stopLossPrice"], o["dhan"]["productType"]), (104.8, 100.0, "INTRADAY"))
 
         code, out = self.run_cli("ticket", "show", now="2026-11-23 09:42")
         self.assertIn("NOT READY", out)
