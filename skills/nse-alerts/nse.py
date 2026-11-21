@@ -523,7 +523,7 @@ def orb_state(bars, day, cutoff, range_min=15, step=5, level=None, vol_mult=None
                     prior.append(b)
                     continue
             res.update(status="triggered", entry=r2(b.c), entry_time=end.strftime("%H:%M"),
-                       over_pct=r2((b.c / trig - 1) * 100), volume=int(b.v))
+                       over_pct=r2((b.c / trig - 1) * 100), volume=int(b.v), value_cr=r2(b.c * b.v / 1e7))
             return res
         prior.append(b)
     ref = last or (done[-1] if done else None)
@@ -602,6 +602,7 @@ UNIVERSE_URLS = {
     "nifty100": "https://www.niftyindices.com/IndexConstituent/ind_nifty100list.csv",
     "nifty200": "https://www.niftyindices.com/IndexConstituent/ind_nifty200list.csv",
     "nifty500": "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+    "niftybank": "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
     "midcap150": "https://www.niftyindices.com/IndexConstituent/ind_niftymidcap150list.csv",
     "smallcap250": "https://www.niftyindices.com/IndexConstituent/ind_niftysmallcap250list.csv",
     "all": "https://archives.nseindia.com/content/equities/EQUITY_L.csv",
@@ -627,15 +628,27 @@ def cmd_universe(a, ctx):
         with open(a.file, encoding="utf-8-sig") as f:
             text = f.read()
         src = a.file
+        syms = parse_universe_csv(text)
     else:
-        url = UNIVERSE_URLS[a.index]
-        try:
-            text = http_get(url, ua=BROWSER_UA, accept="text/csv,*/*").decode("utf-8-sig")
-        except (urllib.error.URLError, urllib.error.HTTPError) as e:
-            raise NSEError("could not download %s (%s). NSE sites sometimes refuse scripts: open the URL "
-                           "in a browser, save the CSV and run `universe --file the.csv`." % (url, e))
-        src = url
-    syms = parse_universe_csv(text)
+        names = [x.strip().lower() for x in a.index.split(",") if x.strip()]
+        bad = [x for x in names if x not in UNIVERSE_URLS]
+        if bad:
+            raise NSEError("unknown index %s: choose from %s (comma list allowed)" % (", ".join(bad), ", ".join(sorted(UNIVERSE_URLS))))
+        syms, seen = [], set()
+        for name in names:
+            url = UNIVERSE_URLS[name]
+            try:
+                text = http_get(url, ua=BROWSER_UA, accept="text/csv,*/*").decode("utf-8-sig")
+            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                raise NSEError("could not download %s (%s). NSE sites sometimes refuse scripts: open the URL "
+                               "in a browser, save the CSV and run `universe --file the.csv`." % (url, e))
+            for x in parse_universe_csv(text):
+                if x["symbol"] not in seen:
+                    seen.add(x["symbol"])
+                    syms.append(x)
+            if not ctx.offline:
+                time.sleep(PAUSE)
+        src = " + ".join(names)
     if not syms:
         raise NSEError("no symbols found in %s (expected a SYMBOL column)" % src)
     doc = {"as_of": ctx.now.strftime("%Y-%m-%d %H:%M IST"), "source": src, "exchange": "NSE", "symbols": syms}
@@ -725,15 +738,15 @@ def scan_orb(a, ctx, cfg, ex):
             waiting += 1
         if not ctx.offline and i + 1 < len(syms):
             time.sleep(PAUSE)
-    hits.sort(key=lambda h: h["entry_time"])
+    hits.sort(key=lambda h: (h["entry_time"], -h.get("value_cr", 0)))  # earliest first; ties: most rupees traded
     _write(ctx.p("watchlist.json"), {"as_of": cutoff.strftime("%Y-%m-%d %H:%M IST"), "mode": "orb",
                                      "scanned": len(syms), "hits": hits})
     print("Opening-range breakouts at %s IST: %d of %d charts closed above their %d-minute range "
           "(%d still waiting)." % (cutoff.strftime("%H:%M"), len(hits), len(syms),
                                    a.range_min or cfg["range_min"], waiting))
     for h in hits[: a.top]:
-        print("  %-12s range %.2f-%.2f, the %s bar closed at %.2f (%.2f%% over)"
-              % (h["symbol"], h["or_low"], h["or_high"], h["entry_time"], h["entry"], h["over_pct"]))
+        print("  %-12s range %.2f-%.2f, the %s bar closed at %.2f (%.2f%% over, %.1f cr traded in that bar)"
+              % (h["symbol"], h["or_low"], h["or_high"], h["entry_time"], h["entry"], h["over_pct"], h.get("value_cr", 0)))
     return 0
 
 
@@ -1692,7 +1705,8 @@ def cmd_results(a, ctx):
 def replay_day(sym_bars, day, cfg, at, picks, step=5):
     """What the 9:50 routine would have suggested on `day`, and how each pick ended by flat_by.
 
-    Rule: opening-range breakout at `at`, earliest triggers first, stop at the range midpoint,
+    Rule: opening-range breakout at `at`, earliest triggers first (ties: the most rupees traded in
+    the breakout bar), stop at the range midpoint,
     target 2R, size with the config, square off at flat_by. A bar touching both = stop."""
     tick = float(cfg["tick_size"])
     last_entry = hhmm(cfg["no_entries_after"])
@@ -1702,10 +1716,10 @@ def replay_day(sym_bars, day, cfg, at, picks, step=5):
     for sym, bars in sym_bars.items():
         st = orb_state(bars, day, cutoff, int(cfg["range_min"]), step, None, None, last_entry)
         if st["status"] == "triggered":
-            cands.append((st["entry_time"], sym, st))
-    cands.sort()
+            cands.append((st["entry_time"], -st.get("value_cr", 0), sym, st))
+    cands.sort(key=lambda c: c[:3])  # earliest first; ties: most rupees traded in the breakout bar
     trades = []
-    for et, sym, st in cands:
+    for et, _, sym, st in cands:
         if len(trades) >= picks:
             break
         e = st["entry"]
@@ -1944,7 +1958,8 @@ def build_parser():
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("universe", parents=[common], help="symbol list -> nse/universe.json")
-    p.add_argument("--index", default="nifty500", choices=sorted(UNIVERSE_URLS))
+    p.add_argument("--index", default="nifty500",
+                   help="one or more, comma separated: " + ", ".join(sorted(UNIVERSE_URLS)) + " (e.g. nifty500,niftybank)")
     p.add_argument("--file", help="a CSV you saved yourself (needs a Symbol column)")
 
     p = sub.add_parser("scan", parents=[common], help="daily setups or opening-range breakouts")

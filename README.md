@@ -38,7 +38,7 @@ cp -r skills/nse-* ~/.claude/skills/
 
 ```bash
 python3 skills/nse-budget/nse.py init                        # nse/config.json: अपनी पूँजी और रिस्क भरें
-python3 skills/nse-scanner/nse.py universe --index nifty500
+python3 skills/nse-scanner/nse.py universe --index nifty500,niftybank
 python3 skills/nse-scanner/nse.py scan orb --at 09:45
 python3 skills/nse-entry/nse.py entry check RELIANCE
 python3 skills/nse-exit/nse.py plan --stop or-mid --target 2R

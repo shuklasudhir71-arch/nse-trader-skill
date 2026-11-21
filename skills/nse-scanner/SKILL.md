@@ -21,7 +21,7 @@ land in `./nse/`.
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/nse.py" init                          # once: nse/config.json
-python3 "${CLAUDE_SKILL_DIR}/nse.py" universe --index nifty500     # or nifty50, nifty100, nifty200, midcap150, smallcap250, all
+python3 "${CLAUDE_SKILL_DIR}/nse.py" universe --index nifty500,niftybank   # or nifty50, nifty100, nifty200, midcap150, smallcap250, all; comma list merges
 python3 "${CLAUDE_SKILL_DIR}/nse.py" scan daily                    # after 15:30 or before 9:15, on daily closes
 python3 "${CLAUDE_SKILL_DIR}/nse.py" scan daily --setup breakout20,bull_flag
 python3 "${CLAUDE_SKILL_DIR}/nse.py" scan orb --at 09:45           # opening-range breakouts so far today
