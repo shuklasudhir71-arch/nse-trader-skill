@@ -1420,6 +1420,112 @@ def cmd_ticket(a, ctx):
     return 0
 
 
+# ------------------------------------------------------------------ review (paper results of the daily routine)
+
+def replay_day(sym_bars, day, cfg, at, picks, step=5):
+    """What the 9:50 routine would have suggested on `day`, and how each pick ended by flat_by.
+
+    Rule: opening-range breakout at `at`, earliest triggers first, stop at the range midpoint,
+    target 2R, size with the config, square off at flat_by. A bar touching both = stop."""
+    tick = float(cfg["tick_size"])
+    last_entry = hhmm(cfg["no_entries_after"])
+    flat = hhmm(cfg["flat_by"])
+    cutoff = dt.datetime.combine(day, at)
+    cands = []
+    for sym, bars in sym_bars.items():
+        st = orb_state(bars, day, cutoff, int(cfg["range_min"]), step, None, None, last_entry)
+        if st["status"] == "triggered":
+            cands.append((st["entry_time"], sym, st))
+    cands.sort()
+    trades = []
+    for et, sym, st in cands:
+        if len(trades) >= picks:
+            break
+        e = st["entry"]
+        stop = floor_tick((st["or_high"] + st["or_low"]) / 2, tick)
+        if stop >= e or e - stop < 3 * tick:
+            continue
+        tgt = ceil_tick(e + 2 * (e - stop), tick)
+        qty = size_order({"entry": e, "stop": stop, "target": tgt}, cfg)[0]
+        if qty < 1:
+            continue
+        exit_px, how = None, "square-off"
+        lastc = e
+        for b in day_bars(sym_bars[sym], day):
+            if b.t.time() < hhmm(et):
+                continue
+            if add_min(b.t, step).time() > flat:
+                break
+            if b.l <= stop:
+                exit_px, how = min(b.o, stop), "stop"
+                break
+            if b.h >= tgt:
+                exit_px, how = tgt, "target"
+                break
+            lastc = b.c
+        if exit_px is None:
+            exit_px = lastc
+        ch = charges(qty * e, qty * exit_px, cfg["charges"], "NSE", cfg["product"])["total"]
+        pnl = qty * (exit_px - e) - ch
+        trades.append({"symbol": sym, "entry_time": et, "entry": e, "stop": stop, "target": tgt, "qty": qty,
+                       "exit": r2(exit_px), "how": how, "pnl": r2(pnl)})
+    return trades
+
+
+def cmd_review(a, ctx):
+    cfg = ctx.config()
+    syms = universe_symbols(ctx, a)
+    at = hhmm(a.at, "--at")
+    sym_bars = {}
+    for i, s in enumerate(syms):
+        try:
+            sym_bars[s] = chart(ysym(s, "NSE"), "5m", "60d", ctx.offline)[1]
+        except NSEError:
+            pass
+        if not ctx.offline and i + 1 < len(syms):
+            time.sleep(PAUSE)
+    days = sorted({b.t.date() for bars in sym_bars.values() for b in bars})
+    done_today = ctx.now.time() >= hhmm(cfg["flat_by"])
+    days = [d for d in days if trading_day(d)[0] and (d < ctx.today or (d == ctx.today and done_today))]
+    days = days[-a.days:]
+    if not days:
+        print("No finished trading days in the data yet.")
+        return 1
+    total, wins, losses, n, peak, dd, eq = 0.0, 0, 0, 0, 0.0, 0.0, 0.0
+    rows = []
+    for d in days:
+        tr = replay_day(sym_bars, d, cfg, at, a.picks)
+        day_pnl = sum(t["pnl"] for t in tr)
+        rows.append((d, tr, day_pnl))
+        for t in tr:
+            n += 1
+            wins += t["pnl"] > 0
+            losses += t["pnl"] <= 0
+        eq += day_pnl
+        peak = max(peak, eq)
+        dd = max(dd, peak - eq)
+        total += day_pnl
+    last = rows[-1]
+    print("Paper review: the %s routine on %d stocks (breakout by %s, stop at range middle, target 2R, "
+          "max loss %s a trade, square off %s, charges included)."
+          % (at.strftime("%H:%M"), len(sym_bars), at.strftime("%H:%M"), inr(cfg["max_loss_per_trade"]), cfg["flat_by"]))
+    print("Latest day %s: %s" % (last[0], "no trades" if not last[1] else inr(last[2])))
+    for t in last[1]:
+        print("  %-11s buy %d at %.2f (%s), stop %.2f, target %.2f -> %s at %.2f: %s"
+              % (t["symbol"], t["qty"], t["entry"], t["entry_time"], t["stop"], t["target"], t["how"], t["exit"], inr(t["pnl"])))
+    if a.daily:
+        for d, tr, p in rows:
+            print("  %s  %d trade(s)  %s" % (d, len(tr), inr(p)))
+    print("Last %d trading days: %d trades, %d won, %d lost (%s win rate), net %s, worst drop from a high %s."
+          % (len(rows), n, wins, losses, ("%.0f%%" % (wins / n * 100)) if n else "-", inr(total), inr(dd)))
+    print("Hypothetical: real fills, slippage and delayed data would make it worse. Not a prediction.")
+    if a.write:
+        _write(ctx.p("review.json"), {"as_of": ctx.now.strftime("%Y-%m-%d %H:%M IST"), "days": [
+            {"date": d.isoformat(), "pnl": r2(p), "trades": tr} for d, tr, p in rows],
+            "total": r2(total), "trades": n, "wins": wins, "max_drawdown": r2(dd)})
+    return 0
+
+
 # ------------------------------------------------------------------ quotes / alerts
 
 def cmd_quote(a, ctx):
@@ -1640,6 +1746,15 @@ def build_parser():
     t.add_argument("--product", choices=["MIS", "CNC"])
     t.add_argument("--exchange", choices=["NSE", "BSE"])
 
+    p = sub.add_parser("review", parents=[common], help="paper results of the daily breakout routine")
+    p.add_argument("--days", type=int, default=30)
+    p.add_argument("--at", default="09:50")
+    p.add_argument("--picks", type=int, default=3)
+    p.add_argument("--symbols")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--daily", action="store_true", help="one line per day")
+    p.add_argument("--write", action="store_true")
+
     p = sub.add_parser("quote", parents=[common], help="free delayed prices")
     p.add_argument("symbols", nargs="*")
     p.add_argument("--holdings", action="store_true", help="add the plan's symbol")
@@ -1665,7 +1780,7 @@ def build_parser():
 
 COMMANDS = {"init": cmd_init, "clock": cmd_clock, "universe": cmd_universe, "scan": cmd_scan, "news": cmd_news,
             "entry": cmd_entry, "plan": cmd_plan, "sim": cmd_sim, "size": cmd_size, "risk": cmd_risk,
-            "ticket": cmd_ticket, "quote": cmd_quote, "alerts": cmd_alerts}
+            "ticket": cmd_ticket, "review": cmd_review, "quote": cmd_quote, "alerts": cmd_alerts}
 
 
 def main(argv=None):

@@ -305,5 +305,17 @@ class TestFlow(Base):
         self.assertIn("Square off TEST", out)
 
 
+    def test_review(self):
+        self.config(max_loss_per_trade=500)
+        code, out = self.run_cli("review", "--symbols", "TEST", "--days", "10", "--daily", now="2026-11-23 16:00")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Latest day 2026-11-23", out)
+        self.assertIn("TEST", out)
+        self.assertIn("Last 10 trading days", out)
+        # before the square-off time today is not counted yet
+        code, out = self.run_cli("review", "--symbols", "TEST", "--days", "10", now="2026-11-23 11:00")
+        self.assertNotIn("Latest day 2026-11-23", out)
+
+
 if __name__ == "__main__":
     unittest.main()
