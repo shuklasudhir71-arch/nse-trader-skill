@@ -1,6 +1,6 @@
 # NSE Trader skill (भारतीय शेयर बाज़ार के लिए)
 
-NSE/BSE पर इंट्राडे ट्रेडिंग के लिए Claude की 9 स्किल्स। यह [day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill)
+NSE/BSE पर इंट्राडे ट्रेडिंग के लिए Claude की 11 स्किल्स। यह [day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill)
 (MIT लाइसेंस) के तरीके पर आधारित है, लेकिन भारतीय बाज़ार के लिए नए सिरे से लिखा गया है:
 
 - **भारतीय समय (IST)**: बाज़ार सुबह 9:15 से दोपहर 3:30 तक, प्री-ओपन 9:00 से 9:15
@@ -31,6 +31,8 @@ cp -r skills/nse-* ~/.claude/skills/
 | `/nse-risk` | हर ऑर्डर को आपकी सीमाओं से जाँचता है और PASS या BLOCK बताता है |
 | `/nse-broker` | Kite ऑर्डर टिकट बनाता है। आपकी "हाँ" के बिना कुछ नहीं होता |
 | `/nse-alerts` | कीमत, स्टॉप, टारगेट और समय के अलर्ट देता है |
+| `/nse-deals` | NSE के Bulk और Block Deals: बड़े निवेशकों (म्यूचुअल फ़ंड, विदेशी फ़ंड, प्रमोटर) की ख़रीद-बिक्री, HFT को छाँटकर |
+| `/nse-analyst` | तिमाही नतीजे: बिक्री, मार्जिन, मुनाफ़ा, EPS, भारतीय वित्त-वर्ष के हिसाब से (Q2 FY27) |
 
 ## एक ट्रेड, शुरू से अंत तक
 
@@ -45,6 +47,9 @@ python3 skills/nse-budget/nse.py size
 python3 skills/nse-risk/nse.py risk
 python3 skills/nse-broker/nse.py ticket show
 python3 skills/nse-alerts/nse.py alerts add --from-plan
+python3 skills/nse-deals/nse.py deals                       # कल के बड़े सौदे
+python3 skills/nse-analyst/nse.py results RELIANCE,TCS      # तिमाही नतीजे
+python3 skills/nse-budget/nse.py review --days 30           # पेपर ट्रेडिंग का 30 दिन का हिसाब
 ```
 
 सारी फ़ाइलें उसी फ़ोल्डर के अंदर `nse/` में बनती हैं जहाँ से आप कमांड चलाते हैं।

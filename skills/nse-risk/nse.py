@@ -1420,6 +1420,273 @@ def cmd_ticket(a, ctx):
     return 0
 
 
+# ------------------------------------------------------------------ deals (bulk and block deals)
+
+DEALS_URLS = {"bulk": "https://archives.nseindia.com/content/equities/bulk.csv",
+              "block": "https://archives.nseindia.com/content/equities/block.csv"}
+PROP_WORDS = ["ALPHAGREP", "QE SECURITIES", "JUMP TRADING", "GRAVITON", "IRAGE", "NK SECURITIES", "HRTI",
+              "TOWER RESEARCH", "MICROCURVES", "JUNOMONETA", "SILVERLEAF", "PACE STOCK", "SUNRISE GILTS",
+              "ELIXIR WEALTH", "MANSI SHARE", "QUADEYE", "DOLAT", "XTX", "CITADEL", "VIRTU", "OPTIVER",
+              "NUVAMA WEALTH", "SHARE INDIA", "ESTEE ADVISORS", "NEXTBILLION", "BEACON STOCK"]
+KIND_WORDS = [
+    ("mutual fund", ["MUTUAL FUND", " MF ", " MF-", "AMC ", "ASSET MANAGEMENT"]),
+    ("insurance", ["INSURANCE", "LIC OF INDIA", "LIFE INSURANCE"]),
+    ("foreign fund", ["FPI", "FUND", "PTE", "LLC", "PLC", "SICAV", "MAURITIUS", "SINGAPORE", "CAYMAN",
+                      "LP ", "L.P", "INC", "MASTER", "TRUST", "CAPITAL"]),
+    ("company", ["PRIVATE LIMITED", "PVT LTD", "LIMITED", "LTD", "LLP"]),
+]
+
+
+def deal_kind(client):
+    c = " " + client.upper() + " "
+    if any(w in c for w in PROP_WORDS):
+        return "prop/HFT"
+    for name, words in KIND_WORDS:
+        if any(w in c for w in words):
+            return name
+    return "individual"
+
+
+def parse_deals(text, kind):
+    out = []
+    for r in csv.DictReader(io.StringIO(text)):
+        r = {(k or "").strip(): (v or "").strip() for k, v in r.items()}
+        try:
+            qty = int(float(r.get("Quantity Traded", "0").replace(",", "")))
+            px = float(r.get("Trade Price / Wght. Avg. Price", "0").replace(",", ""))
+            d = dt.datetime.strptime(r["Date"], "%d-%b-%Y").date()
+        except (ValueError, KeyError):
+            continue
+        side = r.get("Buy/Sell", "").upper()
+        if side not in ("BUY", "SELL"):
+            continue
+        out.append({"date": d.isoformat(), "symbol": r.get("Symbol", "").upper(), "name": r.get("Security Name", ""),
+                    "client": r.get("Client Name", ""), "side": side, "qty": qty, "price": px,
+                    "value_cr": r2(qty * px / 1e7), "type": kind, "who": deal_kind(r.get("Client Name", ""))})
+    return out
+
+
+def summarize_deals(deals):
+    """Per stock: net rupee value by real investors (prop/HFT and same-day round trips left out)."""
+    by_client = collections.defaultdict(lambda: {"buy": 0, "sell": 0, "bv": 0.0, "sv": 0.0})
+    for d in deals:
+        k = (d["symbol"], d["client"])
+        x = by_client[k]
+        if d["side"] == "BUY":
+            x["buy"] += d["qty"]
+            x["bv"] += d["qty"] * d["price"]
+        else:
+            x["sell"] += d["qty"]
+            x["sv"] += d["qty"] * d["price"]
+    stocks = collections.defaultdict(lambda: {"net_cr": 0.0, "buyers": [], "sellers": [], "skipped": 0, "name": ""})
+    names = {d["symbol"]: d["name"] for d in deals}
+    kinds = {(d["symbol"], d["client"]): (d["who"], d["type"]) for d in deals}
+    for (sym, client), x in by_client.items():
+        st = stocks[sym]
+        st["name"] = names.get(sym, "")
+        who, typ = kinds[(sym, client)]
+        round_trip = x["buy"] and x["sell"] and min(x["buy"], x["sell"]) >= 0.8 * max(x["buy"], x["sell"])
+        if who == "prop/HFT" or round_trip:
+            st["skipped"] += 1
+            continue
+        net = (x["bv"] - x["sv"]) / 1e7
+        if abs(net) < 0.01:
+            continue
+        st["net_cr"] += net
+        e = {"client": client, "who": who, "type": typ, "net_cr": r2(net),
+             "qty": x["buy"] - x["sell"], "avg_price": r2((x["bv"] / x["buy"]) if net > 0 and x["buy"] else
+                                                          (x["sv"] / x["sell"]) if x["sell"] else 0)}
+        (st["buyers"] if net > 0 else st["sellers"]).append(e)
+    out = []
+    for sym, st in stocks.items():
+        if not st["buyers"] and not st["sellers"]:
+            continue
+        st["buyers"].sort(key=lambda e: -e["net_cr"])
+        st["sellers"].sort(key=lambda e: e["net_cr"])
+        out.append(dict(st, symbol=sym, net_cr=r2(st["net_cr"])))
+    out.sort(key=lambda s: -abs(s["net_cr"]))
+    return out
+
+
+def cmd_deals(a, ctx):
+    deals = []
+    for kind, url in DEALS_URLS.items():
+        if ctx.offline:
+            path = os.path.join(ctx.offline, "%s.csv" % kind)
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8-sig") as f:
+                text = f.read()
+        else:
+            try:
+                text = http_get(url, ua=BROWSER_UA, accept="text/csv,*/*").decode("utf-8-sig", "replace")
+            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                print("could not download %s deals (%s)" % (kind, e))
+                continue
+        deals += parse_deals(text, kind)
+    if not deals:
+        raise NSEError("no bulk or block deals downloaded")
+    day = max(d["date"] for d in deals)
+    uni = set()
+    if a.universe:
+        doc = _read(ctx.p("universe.json"), None)
+        if not doc:
+            raise NSEError("--universe needs nse/universe.json: run `universe --index nifty500` first")
+        uni = {x["symbol"] for x in doc["symbols"]}
+    stocks = summarize_deals(deals)
+    if uni:
+        stocks = [s for s in stocks if s["symbol"] in uni]
+    if a.symbols:
+        want = {x.strip().upper() for x in a.symbols.split(",")}
+        stocks = [s for s in stocks if s["symbol"] in want]
+    stocks = [s for s in stocks if abs(s["net_cr"]) >= a.min_cr]
+    _write(ctx.p("deals.json"), {"date": day, "as_of": ctx.now.strftime("%Y-%m-%d %H:%M IST"),
+                                 "raw": len(deals), "stocks": stocks})
+    print("NSE bulk + block deals of %s: %d deals; %d stocks with real-investor buying or selling of at least "
+          "%s crore (prop/HFT desks and same-day round trips left out)." % (day, len(deals), len(stocks), a.min_cr))
+    for s in stocks[: a.top]:
+        print("  %-12s net %s %.2f cr  %s" % (s["symbol"], "BUY " if s["net_cr"] > 0 else "SELL", abs(s["net_cr"]), s["name"]))
+        for e in (s["buyers"] + s["sellers"])[:3]:
+            print("      %-4s %s cr  %s (%s, %s deal) at %.2f" % ("buy" if e["net_cr"] > 0 else "sell", "%.2f" % abs(e["net_cr"]),
+                                                                e["client"], e["who"], e["type"], e["avg_price"]))
+    if len(stocks) > a.top:
+        print("  ... %d more in %s" % (len(stocks) - a.top, ctx.p("deals.json")))
+    print("Bulk = over 0.5% of a company's shares in a day; block = a single trade of 10 crore+ in the block window. "
+          "Public data from NSE, end of day. A big buyer is information, not a reason to buy.")
+    return 0
+
+
+# ------------------------------------------------------------------ results (quarterly earnings)
+
+FUND_TYPES = ["quarterlyTotalRevenue", "quarterlyOperatingIncome", "quarterlyNetIncome", "quarterlyDilutedEPS"]
+
+
+def fiscal_label(d):
+    """Indian fiscal quarter: 2026-09-30 -> Q2 FY27."""
+    q = {6: 1, 9: 2, 12: 3, 3: 4}.get(d.month)
+    fy = d.year + 1 if d.month >= 4 else d.year
+    return ("Q%d FY%02d" % (q, fy % 100)) if q else d.isoformat()
+
+
+def parse_fundamentals(doc):
+    """{date: {revenue, operating, net, eps}} from Yahoo's fundamentals-timeseries JSON (rupees)."""
+    keys = {"quarterlyTotalRevenue": "revenue", "quarterlyOperatingIncome": "operating",
+            "quarterlyNetIncome": "net", "quarterlyDilutedEPS": "eps"}
+    out = collections.defaultdict(dict)
+    for r in ((doc.get("timeseries") or {}).get("result") or []):
+        t = ((r.get("meta") or {}).get("type") or [None])[0]
+        if t not in keys:
+            continue
+        for x in r.get(t) or []:
+            if x and x.get("asOfDate") and (x.get("reportedValue") or {}).get("raw") is not None:
+                out[dt.date.fromisoformat(x["asOfDate"])][keys[t]] = float(x["reportedValue"]["raw"])
+    return dict(out)
+
+
+def fundamentals(y, offline=None, now_utc=None):
+    if offline:
+        doc = _read(os.path.join(offline, "%s_fund.json" % y), None)
+        if doc is None:
+            raise NSEError("offline: no file %s_fund.json" % y)
+        return parse_fundamentals(doc)
+    p2 = int(((now_utc or utcnow()) - dt.datetime(1970, 1, 1)).total_seconds())
+    p1 = p2 - 86400 * 900
+    err = None
+    for host in YAHOO_HOSTS:
+        url = ("https://%s/ws/fundamentals-timeseries/v1/finance/timeseries/%s?type=%s&period1=%d&period2=%d"
+               % (host, urllib.parse.quote(y, safe=""), ",".join(FUND_TYPES), p1, p2))
+        try:
+            return parse_fundamentals(json.loads(http_get(url).decode("utf-8")))
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as e:
+            err = e
+    raise NSEError("could not read quarterly results for %s: %s" % (y, err))
+
+
+def pct_change(new, old):
+    if new is None or old in (None, 0):
+        return None
+    return (new - old) / abs(old) * 100
+
+
+def results_summary(q):
+    dates = sorted(q)
+    if not dates:
+        return None
+    last = dates[-1]
+    yago = next((d for d in dates if abs((d - last.replace(year=last.year - 1)).days) <= 5), None)
+    prev = dates[-2] if len(dates) > 1 else None
+    L = q[last]
+    out = {"quarter": fiscal_label(last), "date": last.isoformat(), "rows": [], "notes": []}
+    for d in dates[-6:]:
+        x = q[d]
+        rev = x.get("revenue")
+        out["rows"].append({"quarter": fiscal_label(d), "revenue_cr": r2(rev / 1e7) if rev else None,
+                            "op_margin": r2(x["operating"] / rev * 100) if rev and x.get("operating") is not None else None,
+                            "net_cr": r2(x["net"] / 1e7) if x.get("net") is not None else None,
+                            "net_margin": r2(x["net"] / rev * 100) if rev and x.get("net") is not None else None,
+                            "eps": x.get("eps")})
+    for key in ("revenue", "net", "eps"):
+        if yago:
+            out["yoy_" + key] = r2(pct_change(L.get(key), q[yago].get(key))) if pct_change(L.get(key), q[yago].get(key)) is not None else None
+        if prev:
+            out["qoq_" + key] = r2(pct_change(L.get(key), q[prev].get(key))) if pct_change(L.get(key), q[prev].get(key)) is not None else None
+    shown = dates[-6:]
+    missing, d = [], shown[0]
+    while d < last:
+        m = d.month + 3
+        d = dt.date(d.year + (m - 1) // 12, (m - 1) % 12 + 1, 1)
+        d = dt.date(d.year, d.month, [31, 29 if d.year % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][d.month - 1])
+        if d < last and not any(abs((x - d).days) <= 5 for x in shown):
+            missing.append(fiscal_label(d))
+    if missing:
+        out["notes"].append("missing in the free data: " + ", ".join(missing))
+    if not yago:
+        out["notes"].append("the same quarter a year earlier is missing, so no year-on-year change")
+    return out
+
+
+def cmd_results(a, ctx):
+    syms = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
+    names = names_map(ctx)
+    docs = {}
+    for i, s in enumerate(syms):
+        y = ysym(s, a.exchange or "NSE")
+        try:
+            q = fundamentals(y, ctx.offline, ctx.now_utc)
+        except NSEError as e:
+            print("%s: %s" % (s, e))
+            continue
+        sm = results_summary(q)
+        if not sm:
+            print("%s: no quarterly results in the free data." % s)
+            continue
+        docs[s] = sm
+        print("%s%s: latest quarter %s (ended %s). Amounts in crore rupees." % (s, (" (%s)" % names[s]) if s in names else "",
+                                                                            sm["quarter"], sm["date"]))
+        print("  %-9s %12s %9s %12s %9s %8s" % ("quarter", "revenue", "op marg", "net profit", "net marg", "EPS"))
+        f = lambda v, fmt: (fmt % v) if v is not None else "-"
+        for r in sm["rows"]:
+            print("  %-9s %12s %9s %12s %9s %8s" % (r["quarter"], f(r["revenue_cr"], "%.0f"), f(r["op_margin"], "%.1f%%"),
+                                                     f(r["net_cr"], "%.0f"), f(r["net_margin"], "%.1f%%"), f(r["eps"], "%.2f")))
+        bits = []
+        for key, label in (("revenue", "revenue"), ("net", "net profit"), ("eps", "EPS")):
+            y_ = sm.get("yoy_" + key)
+            q_ = sm.get("qoq_" + key)
+            if y_ is not None or q_ is not None:
+                bits.append("%s %s" % (label, ", ".join(x for x in (("%+.1f%% YoY" % y_) if y_ is not None else "",
+                                                                     ("%+.1f%% QoQ" % q_) if q_ is not None else "") if x)))
+        if bits:
+            print("  Change: " + "; ".join(bits) + ".")
+        for n in sm["notes"]:
+            print("  Note: " + n + ".")
+        if not ctx.offline and i + 1 < len(syms):
+            time.sleep(PAUSE)
+    if docs:
+        _write(ctx.p("results.json"), {"as_of": ctx.now.strftime("%Y-%m-%d %H:%M IST"), "stocks": docs})
+    print("Free, unofficial Yahoo data (consolidated as Yahoo reports it). Official numbers: the company's filing on nseindia.com.")
+    return 0 if docs else 1
+
+
 # ------------------------------------------------------------------ review (paper results of the daily routine)
 
 def replay_day(sym_bars, day, cfg, at, picks, step=5):
@@ -1746,6 +2013,16 @@ def build_parser():
     t.add_argument("--product", choices=["MIS", "CNC"])
     t.add_argument("--exchange", choices=["NSE", "BSE"])
 
+    p = sub.add_parser("deals", parents=[common], help="NSE bulk and block deals: who bought, who sold")
+    p.add_argument("--universe", action="store_true", help="only stocks in nse/universe.json")
+    p.add_argument("--symbols")
+    p.add_argument("--min-cr", type=float, default=1.0, help="minimum net value in crore (default 1)")
+    p.add_argument("--top", type=int, default=15)
+
+    p = sub.add_parser("results", parents=[common], help="quarterly results: revenue, margins, profit, EPS")
+    p.add_argument("symbols", help="comma list, e.g. RELIANCE,TCS")
+    p.add_argument("--exchange", choices=["NSE", "BSE"])
+
     p = sub.add_parser("review", parents=[common], help="paper results of the daily breakout routine")
     p.add_argument("--days", type=int, default=30)
     p.add_argument("--at", default="09:50")
@@ -1780,7 +2057,7 @@ def build_parser():
 
 COMMANDS = {"init": cmd_init, "clock": cmd_clock, "universe": cmd_universe, "scan": cmd_scan, "news": cmd_news,
             "entry": cmd_entry, "plan": cmd_plan, "sim": cmd_sim, "size": cmd_size, "risk": cmd_risk,
-            "ticket": cmd_ticket, "review": cmd_review, "quote": cmd_quote, "alerts": cmd_alerts}
+            "ticket": cmd_ticket, "deals": cmd_deals, "results": cmd_results, "review": cmd_review, "quote": cmd_quote, "alerts": cmd_alerts}
 
 
 def main(argv=None):

@@ -184,6 +184,38 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(it["utc"], dt.datetime(2026, 11, 23, 3, 30))
         self.assertIn("results", nse.tag(it["title"]))
 
+    def test_deals(self):
+        bulk = ("Date,Symbol,Security Name,Client Name,Buy/Sell,Quantity Traded,Trade Price / Wght. Avg. Price,Remarks\n"
+                "20-NOV-2026,ABC,Abc Ltd,ALPHAGREP SECURITIES PRIVATE LIMITED,BUY,1000000,100,-\n"
+                "20-NOV-2026,ABC,Abc Ltd,SOME TRADER,BUY,500000,100,-\n"
+                "20-NOV-2026,ABC,Abc Ltd,SOME TRADER,SELL,490000,101,-\n"
+                "20-NOV-2026,ABC,Abc Ltd,HDFC MUTUAL FUND,BUY,300000,100,-\n"
+                "20-NOV-2026,XYZ,Xyz Ltd,RAMESH KUMAR,SELL,200000,50,-\n")
+        d = nse.parse_deals(bulk, "bulk")
+        self.assertEqual(d[0]["who"], "prop/HFT")
+        self.assertEqual(d[3]["who"], "mutual fund")
+        st = {s["symbol"]: s for s in nse.summarize_deals(d)}
+        self.assertEqual(st["ABC"]["net_cr"], 3.0)          # only the mutual fund counts
+        self.assertEqual(st["ABC"]["skipped"], 2)           # HFT desk + same-day round trip
+        self.assertEqual(st["XYZ"]["net_cr"], -1.0)
+        self.assertEqual(st["XYZ"]["sellers"][0]["who"], "individual")
+
+    def test_results(self):
+        def series(t, pts):
+            return {"meta": {"type": [t]}, t: [{"asOfDate": d, "reportedValue": {"raw": v}} for d, v in pts]}
+        doc = {"timeseries": {"result": [
+            series("quarterlyTotalRevenue", [("2025-09-30", 1e10), ("2026-03-31", 1.1e10), ("2026-06-30", 1.15e10),
+                                             ("2026-09-30", 1.2e10)]),
+            series("quarterlyNetIncome", [("2025-09-30", 1e9), ("2026-09-30", 1.5e9)]),
+            series("quarterlyDilutedEPS", [("2025-09-30", 10.0), ("2026-09-30", 15.0)])]}}
+        sm = nse.results_summary(nse.parse_fundamentals(doc))
+        self.assertEqual(sm["quarter"], "Q2 FY27")
+        self.assertEqual(nse.fiscal_label(dt.date(2026, 3, 31)), "Q4 FY26")
+        self.assertEqual(sm["yoy_revenue"], 20.0)
+        self.assertEqual(sm["yoy_net"], 50.0)
+        self.assertEqual(sm["rows"][-1]["revenue_cr"], 1200.0)
+        self.assertIn("Q3 FY26", " ".join(sm["notes"]))   # Dec 2025 quarter is missing
+
 
 class TestFlow(Base):
     def test_orb_states(self):
